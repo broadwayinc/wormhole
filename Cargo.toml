@@ -1,0 +1,18 @@
+[package]
+name = "wormhole"
+version = "0.1.0"
+edition = "2021"
+description = "Live one-way mirror of a folder from one Linux server to another"
+publish = false
+
+[dependencies]
+snow = "0.10"
+notify = { version = "8", default-features = false }
+lz4_flex = "0.11"
+blake2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,26 @@
+# Build output (cargo build)
+/target
+
+# Shared keys from `wormhole keygen`: anyone holding one can write into the receiver's folder
+*.key
+wormhole.key
+
+# Local test folders, backups and logs
+/test/
+/tmp/
+states-backup-*/
+*.log
+
+# Rust leftovers
+**/*.rs.bk
+*.pdb
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Claude Code agent worktrees (nested checkouts, never commit)
+.claude/worktrees/
