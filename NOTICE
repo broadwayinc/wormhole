@@ -1,0 +1,8 @@
+wormhole
+Copyright 2026 BROADWAYINC PTE. LTD.
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It includes software developed by third parties, among them snow (the Noise
+protocol), notify, lz4_flex and the RustCrypto and dalek cryptography crates.
+Their copyright notices and license texts are in THIRD-PARTY-NOTICES.

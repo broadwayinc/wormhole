@@ -7,9 +7,23 @@ Keeps a live copy of a folder on another Linux server. One program, run on both 
 - **receiver** (the server that gets the copy) writes each change into its copy.
 
 It copies one way only: the receiver's copy becomes exactly the sender's folder (new, changed and
-deleted files, folders, permissions). It is built to move the MCP server's `states/` folder from
-mcp.broadwayinc.computer to the mcp.skapi.com server so users stay signed in. See
-[PLAN.md](PLAN.md) for the reasons behind the migration steps.
+deleted files, folders, permissions). A typical use is moving a running service to a new server:
+keep its data folder mirrored until the moment you switch, so nothing written before the switch is
+lost.
+
+## Install
+
+On any Linux server (x86_64 or arm64, glibc 2.17 or newer: Ubuntu, Debian, Amazon Linux, RHEL):
+
+```
+curl -fsSL https://cdn.broadwayinc.com/get/wormhole/v1 | sh
+```
+
+This puts the `wormhole` program in `/usr/local/bin` (and this guide plus the license files in
+`/usr/local/share/doc/wormhole`), so every user can run it. It uses sudo for that folder (on most
+cloud images sudo asks nothing) and checks the download's SHA-256 first. Running it again updates to
+the newest version. Options, given before `sh`: `WORMHOLE_VERSION=0.1.2` (a specific version),
+`WORMHOLE_INSTALL_DIR=/some/bin` (another folder).
 
 ```
 wormhole keygen  <key file>
@@ -18,131 +32,161 @@ wormhole send    --root <dir> --to <ip:port> --key <key file> [--exclude <path>]
 wormhole verify  --root <dir> --to <ip:port> --key <key file> [--exclude <path>]...
 ```
 
-## The two servers
-
-|  | Sender: this box | Receiver: the "scripts" box |
-|---|---|---|
-| Serves today | mcp.broadwayinc.computer | mcp.skapi.com |
-| Instance | i-067417c5067d94007 (r5.xlarge) | i-010ef8bebb1e7c725 (t3.small) |
-| Private IP | 172.31.73.239 | 172.31.38.0 |
-| Security group | sg-07922b75909422ffb (dev:git-server) | sg-08b2c07363aad45ef (internal) |
-| Folder | /home/ubuntu/skapi/dev/mcp/states | `<mcp folder on that box>`/states |
-| Program + key | /home/ubuntu/wormhole/ | /home/ubuntu/wormhole/ |
-
-The two talk over the private network (same VPC), not through the load balancer.
-
 ## Setup
 
-### 1. Build (this box)
+The examples below use these names; put in your own:
+
+| | Sender | Receiver |
+|---|---|---|
+| Private IP | `10.0.1.10` | `10.0.1.20` |
+| Folder | `/srv/app/data` | `/srv/app/data` |
+| Key | `~/wormhole/wormhole.key` | `~/wormhole/wormhole.key` |
+| Port | | `7700` |
+
+Use the servers' private network addresses when they share one (same VPC or LAN).
+
+### 1. Install on both servers
 
 ```
-cd /home/ubuntu/skapi/dev/wormhole
-PATH=~/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PATH cargo build --release
-mkdir -p ~/wormhole && cp target/release/wormhole ~/wormhole/
-~/wormhole/wormhole --version
+curl -fsSL https://cdn.broadwayinc.com/get/wormhole/v1 | sh
+wormhole --version
 ```
 
-The result is a single 900 KB file with nothing to install. The same file runs on both servers
-(both are x86_64 Ubuntu: 22.04 here, 24.04 there).
-
-### 2. Make the shared key (this box)
+### 2. Make the shared key (sender)
 
 ```
-~/wormhole/wormhole keygen ~/wormhole/wormhole.key
+mkdir -p ~/wormhole
+wormhole keygen ~/wormhole/wormhole.key
 ```
 
 Both servers need this same file. Anyone who has it can write into the receiver's folder, so it is
 created readable by you only (mode 600), and it is never sent over the connection. Keep it out of git.
 
-### 3. Copy the program and the key to the receiver
+### 3. Put the same key on the receiver
 
-This box needs to be able to log in to the receiver once. Print this box's public key:
-
-```
-cat ~/.ssh/id_ed25519.pub
-```
-
-On the receiver (log in with your `script-server-virginia` .pem), add that line:
+The key is one line of 64 characters. On the sender, show it:
 
 ```
-echo "<the line printed above>" >> ~/.ssh/authorized_keys
+cat ~/wormhole/wormhole.key
 ```
 
-Back on this box (`-p` keeps the key file at mode 600):
+On the receiver, write that same line into a file only you can read (`umask 077` makes the file
+mode 600):
 
 ```
-scp -p -r ~/wormhole ubuntu@172.31.38.0:~/
-ssh ubuntu@172.31.38.0 'ls -l ~/wormhole && ~/wormhole/wormhole --version'
+mkdir -p ~/wormhole
+(umask 077; echo "<the 64 characters shown above>" > ~/wormhole/wormhole.key)
 ```
 
-### 4. Open port 7700 on the receiver, for this box only
+(Or copy it over SSH: `scp -p ~/wormhole/wormhole.key <user>@10.0.1.20:~/wormhole/`.)
 
-Run this from anywhere the AWS CLI works (for example this box):
+### 4. Let the sender reach the receiver's port
+
+Open TCP port 7700 on the receiver for the sender only. On AWS, add an inbound rule to the
+receiver's security group that allows the sender's security group:
 
 ```
-aws ec2 authorize-security-group-ingress --region us-east-1 \
-  --group-id sg-08b2c07363aad45ef \
-  --ip-permissions 'IpProtocol=tcp,FromPort=7700,ToPort=7700,UserIdGroupPairs=[{GroupId=sg-07922b75909422ffb,Description="wormhole from the mcp.broadwayinc.computer box"}]'
+aws ec2 authorize-security-group-ingress --region <region> \
+  --group-id <receiver security group id> \
+  --ip-permissions 'IpProtocol=tcp,FromPort=7700,ToPort=7700,UserIdGroupPairs=[{GroupId=<sender security group id>,Description="wormhole"}]'
 ```
 
-This lets in only servers in this box's security group. The "internal" group is shared with other
-servers, but nothing else listens on 7700. The key is a second lock: a connection without the right
+With a host firewall instead (ufw): `sudo ufw allow from 10.0.1.10 to any port 7700 proto tcp`.
+
+Never open the port to the whole internet. The key is a second lock: a connection without the right
 key is dropped at the first message.
 
-### 5. Start the receiver (receiver box)
+### 5. Start the receiver
 
-First stop the MCP there. The copy replaces its `states/`, and a running MCP would not see the new
-files anyway (it reads sign-ins into memory when it starts). Keep a backup of what is there now:
-
-```
-pm2 stop MCPSERVER_SKAPI BQ_CLOUD_IMPORT_SKAPI
-MCP_DIR=/home/ubuntu/<mcp folder>          # the folder that has ecosystem.skapi.config.js
-cp -a $MCP_DIR/states ~/states-backup-$(date +%F)
-```
-
-Then:
+If a service on the receiver uses the folder, stop it first: the copy replaces the folder's
+contents. Keep a backup of what is there now:
 
 ```
-pm2 start ~/wormhole/wormhole --name WORMHOLE_RECV --interpreter none -- \
-  receive --root $MCP_DIR/states --listen 172.31.38.0:7700 --key /home/ubuntu/wormhole/wormhole.key
+cp -a /srv/app/data ~/data-backup-$(date +%F)
+```
+
+Then run the receiver under pm2 (or systemd, below) so it comes back after a crash or a reboot:
+
+```
+pm2 start /usr/local/bin/wormhole --name WORMHOLE_RECV --interpreter none -- \
+  receive --root /srv/app/data --listen 10.0.1.20:7700 --key /home/<user>/wormhole/wormhole.key
 pm2 save
 pm2 logs WORMHOLE_RECV --lines 5 --nostream
 ```
 
-You should see `receiving into .../states, listening on 172.31.38.0:7700`.
+You should see `receiving into /srv/app/data, listening on 10.0.1.20:7700`.
 
-### 6. Start the sender (this box)
+### 6. Start the sender
 
 ```
-pm2 start ~/wormhole/wormhole --name WORMHOLE_SEND --interpreter none -- \
-  send --root /home/ubuntu/skapi/dev/mcp/states --to 172.31.38.0:7700 \
-  --key /home/ubuntu/wormhole/wormhole.key --exclude cloud-import/tmp
+pm2 start /usr/local/bin/wormhole --name WORMHOLE_SEND --interpreter none -- \
+  send --root /srv/app/data --to 10.0.1.20:7700 --key /home/<user>/wormhole/wormhole.key
 pm2 save
 pm2 logs WORMHOLE_SEND --lines 5 --nostream
 ```
 
-You should see `connected to 172.31.38.0:7700` and then `catch-up done in ... s`. The first copy of
-the whole folder (about 2,200 files, 10 MB) takes about a second.
+You should see `connected to 10.0.1.20:7700` and then `catch-up done in ... s`. A folder of a few
+thousand small files is copied in about a second.
 
-`--exclude cloud-import/tmp` skips the import worker's scratch files. Excluded paths are left
-alone on both sides: not sent, and not deleted on the receiver.
+To skip scratch files, add `--exclude <path inside the folder>` (repeatable), for example
+`--exclude tmp`. Excluded paths are left alone on both sides: not sent, and not deleted on the
+receiver.
 
-### 7. Check that both sides are equal (this box)
+### 7. Check that both sides are equal (sender)
 
 ```
-~/wormhole/wormhole verify --root /home/ubuntu/skapi/dev/mcp/states --to 172.31.38.0:7700 \
-  --key ~/wormhole/wormhole.key --exclude cloud-import/tmp
+wormhole verify --root /srv/app/data --to 10.0.1.20:7700 --key ~/wormhole/wormhole.key
 ```
 
-It prints `IN SYNC` (exit code 0) or every difference (exit code 1). While the MCP is running, a
-file written in the last fraction of a second can show up as a difference: run it again.
+Use the same `--exclude` options as the sender. It prints `IN SYNC` (exit code 0) or every
+difference (exit code 1). While files are being written, one changed in the last fraction of a
+second can show up as a difference: run it again.
+
+### Running with systemd instead of pm2
+
+```
+sudo tee /etc/systemd/system/wormhole-send.service >/dev/null <<'EOF'
+[Unit]
+Description=wormhole sender
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=<user>
+ExecStart=/usr/local/bin/wormhole send --root /srv/app/data --to 10.0.1.20:7700 --key /home/<user>/wormhole/wormhole.key
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload && sudo systemctl enable --now wormhole-send
+journalctl -u wormhole-send -n 5
+```
+
+The receiver is the same with `receive --root ... --listen ...` in `ExecStart`.
+
+## Switching over to the new server
+
+1. Stop the service on the sender. From here on nothing changes in the folder.
+2. Run `wormhole verify` until it says `IN SYNC` (the last changes arrive within a second).
+3. Start the service on the receiver. A service that reads its folder into memory at start must be
+   started (or restarted) only now, after the last change has arrived.
+4. Send traffic to the receiver (DNS, load balancer).
+5. Stop wormhole on both servers and close the port.
+
+Never run the service on both servers with live traffic at the same time: each would change its own
+copy, and the copies would drift apart.
+
+To go back, run wormhole the other way (the new server sends, the old one receives) so whatever the
+new server wrote comes back, then switch traffic back.
 
 ## Running day to day
 
-Both run under pm2, so they come back after a crash or a reboot (`pm2 save` done above). If the
-receiver restarts or the network drops, the sender retries (1 s, then up to every 30 s) and on
-reconnect compares everything, so nothing is lost while they are apart. Every 10 minutes the sender
-also compares the whole folder with the receiver (`--rescan-secs`), in case a change was missed.
+If the receiver restarts or the network drops, the sender retries (1 s, then up to every 30 s) and
+on reconnect compares everything, so nothing is lost while they are apart. Every 10 minutes the
+sender also compares the whole folder with the receiver (`--rescan-secs`), in case a change was
+missed.
 
 What the log lines mean:
 
@@ -155,70 +199,17 @@ What the log lines mean:
 | `... ; trying again in N s` | the connection dropped; it retries on its own |
 | `receiver could not apply <path>: <reason>` | the receiver could not write that file (disk full, permissions); retried at the next rescan |
 
-## Cutover day (the move itself)
-
-Before this day, make sure sign-ins will work on the new server (PLAN.md section 5, Phase 0): the
-dashboards must allow `https://mcp.skapi.com` as a sign-in callback, or the receiver's MCP is started
-without `MCP_HOST` at first.
-
-1. This box: stop the MCP. From here on it changes nothing in `states/`.
-   ```
-   pm2 stop MCPSERVER BQ_CLOUD_IMPORT
-   ```
-2. This box: check (repeat until it says `IN SYNC`; the last changes arrive within a second):
-   ```
-   ~/wormhole/wormhole verify --root /home/ubuntu/skapi/dev/mcp/states --to 172.31.38.0:7700 --key ~/wormhole/wormhole.key --exclude cloud-import/tmp
-   ```
-3. Receiver: start the MCP (it reads `states/` into memory now):
-   ```
-   pm2 start MCPSERVER_SKAPI BQ_CLOUD_IMPORT_SKAPI
-   ```
-   (or `pm2 start ecosystem.skapi.config.js` from the mcp folder if they were never started there)
-4. Point mcp.broadwayinc.computer (rule 2) at the receiver's target group `mcp`:
-   ```
-   aws elbv2 modify-rule --region us-east-1 \
-     --rule-arn arn:aws:elasticloadbalancing:us-east-1:136564153953:listener-rule/app/ubuntunvirginia/c64c4e722c3f65f6/d4ba29cde537a7a3/76f9fd4db49cd4f3 \
-     --actions Type=forward,TargetGroupArn=arn:aws:elasticloadbalancing:us-east-1:136564153953:targetgroup/mcp/dbf49a533a39ae9d
-   ```
-   If you had pointed mcp.skapi.com (rule 1) at this box earlier (PLAN.md Phase 1b), point it back
-   to `mcp` the same way with rule 1's ARN:
-   `arn:aws:elasticloadbalancing:us-east-1:136564153953:listener-rule/app/ubuntunvirginia/c64c4e722c3f65f6/d4ba29cde537a7a3/4d63c262b9eac425`
-5. Check the receiver's MCP log: existing users' calls work, no `Session file not found`.
-6. When you are happy: stop wormhole on both sides and close the port.
-   ```
-   pm2 delete WORMHOLE_SEND && pm2 save                          # this box
-   pm2 delete WORMHOLE_RECV && pm2 save                          # receiver
-   aws ec2 revoke-security-group-ingress --region us-east-1 --group-id sg-08b2c07363aad45ef \
-     --ip-permissions 'IpProtocol=tcp,FromPort=7700,ToPort=7700,UserIdGroupPairs=[{GroupId=sg-07922b75909422ffb}]'
-   ```
-
-Between steps 1 and 4 requests to mcp.broadwayinc.computer fail for a few seconds; MCP clients retry.
-Never run both MCPs with live traffic at the same time: they would each change their own copy.
-
-### Going back (rollback)
-
-Run wormhole the other way so that whatever the new server wrote comes back:
-
-1. Receiver box: `pm2 stop MCPSERVER_SKAPI BQ_CLOUD_IMPORT_SKAPI`.
-2. Open port 7700 on THIS box's group (sg-07922b75909422ffb) for sg-08b2c07363aad45ef (step 4 with
-   the two group ids swapped).
-3. This box: `~/wormhole/wormhole receive --root /home/ubuntu/skapi/dev/mcp/states --listen 172.31.73.239:7700 --key ~/wormhole/wormhole.key`
-4. Receiver box: `~/wormhole/wormhole send --root $MCP_DIR/states --to 172.31.73.239:7700 --key ~/wormhole/wormhole.key --exclude cloud-import/tmp`,
-   then `verify` with the same arguments until `IN SYNC`, then stop both (Ctrl+C).
-5. This box: `pm2 start MCPSERVER BQ_CLOUD_IMPORT`, then rule 2 back to target group
-   `skapi-mcp-8000` (`arn:aws:elasticloadbalancing:us-east-1:136564153953:targetgroup/skapi-mcp-8000/aeda7af23aba32a5`).
-
 ## When something is wrong
 
 | Message | What it means / what to do |
 |---|---|
-| `cannot connect to 172.31.38.0:7700: Connection timed out` | port 7700 is not open to this box: step 4 |
-| `cannot connect to 172.31.38.0:7700: Connection refused` | the receiver is not running: `pm2 logs WORMHOLE_RECV` on the receiver |
+| `cannot connect to <ip:port>: Connection timed out` | the port is not open to the sender: step 4 |
+| `cannot connect to <ip:port>: Connection refused` | the receiver is not running: check its log |
 | `handshake refused by the receiver: the key files on the two servers are not the same` | copy the key file again (step 3) and restart both |
 | receiver: `wrong key (or not a wormhole sender); connection dropped` | the same, seen from the receiver; or something else knocked on the port |
-| `the receiver refused: message format ...` | the two servers run different wormhole builds: copy the same file to both |
+| `the receiver refused: message format ...` | the two servers run different wormhole versions: install the same one on both |
 | `warning: key file ... can be read by other users` | `chmod 600 <key file>` |
-| `cannot listen on 172.31.38.0:7700: Address already in use` | another receiver is already running: `pm2 ls` |
+| `cannot listen on <ip:port>: Address already in use` | another receiver is already running: `pm2 ls` |
 | `--root ...: No such file or directory` (sender) | the folder path is wrong |
 
 ## Options
@@ -237,7 +228,7 @@ Run wormhole the other way so that whatever the new server wrote comes back:
 
 - **Watching:** the sender uses inotify (the Linux kernel's file-change notices) on the whole
   folder, including folders created later. Only writes, creates, deletes, renames and permission
-  changes count; reads are ignored, so the MCP reading its own states costs nothing.
+  changes count; reads are ignored, so a service reading its own files costs nothing.
 - **What to send:** a notice only says where to look. The sender compares that part of the folder
   with what it knows the receiver has (BLAKE2s content hashes) and sends the difference. After a
   reconnect or the 10-minute rescan it asks the receiver for its full list and compares everything.
@@ -253,7 +244,7 @@ Run wormhole the other way so that whatever the new server wrote comes back:
 - **Safety on the receiver:** it writes only under `--root`, refuses paths with `..` or absolute
   paths, never follows or copies symlinks, and deletes its own leftover temp files at start.
 
-## Measured (this box, 2026-11-23, a 2,120-file test folder shaped like states/)
+## Measured (2026-11-23, a test folder of 2,120 small JSON files)
 
 | | |
 |---|---|
@@ -264,8 +255,25 @@ Run wormhole the other way so that whatever the new server wrote comes back:
 | Tested | create, change, delete, rename, temp file + rename, folder created / deleted, file turned folder and back, permission change, 50 rapid rewrites sent once, receiver restart with changes made while it was down, wrong key refused, copy edited by hand repaired by the rescan, excluded folder left alone, symlink not copied, 10 s of heavy reads triggering nothing |
 
 The sender gets one kernel notice per file opened (the watcher library always asks for them) and
-throws it away. A test that read 730,000 files in 10 s cost it 4 s of CPU; the MCP's real reading
-is a tiny fraction of that, and the sender runs on the large box.
+throws it away. A test that read 730,000 files in 10 s cost it 4 s of CPU; normal reading is a tiny
+fraction of that.
+
+## Building from source
+
+```
+cargo build --release          # result: target/release/wormhole
+```
+
+Releases: bump `version` in `Cargo.toml`, then `sh tools/package.sh` (builds linux x86_64 and
+aarch64 against glibc 2.17 with cargo-zigbuild and zig, packs `dist/get/wormhole/`) and
+`sh tools/upload.sh` (uploads to the CDN; `--dry-run` shows what it would do). Version folders never
+change once uploaded; `latest` and `v1` (the installer) always point at the newest.
+
+## License
+
+wormhole is licensed under the Apache License, Version 2.0: see [LICENSE](LICENSE) and
+[NOTICE](NOTICE) (Copyright 2026 BROADWAYINC PTE. LTD.). The libraries compiled into the
+binary keep their own licenses, listed in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES).
 
 ## Code
 
@@ -277,3 +285,7 @@ is a tiny fraction of that, and the sender runs on the large box.
 | `src/tree.rs` | folder scan, hashes, path rules |
 | `src/proto.rs` | the messages and their encoding |
 | `src/secure.rs` | the encrypted connection |
+| `install.sh` | the installer, served as `https://cdn.broadwayinc.com/get/wormhole/v1` |
+| `tools/package.sh` | builds and packs a release into `dist/` |
+| `tools/upload.sh` | uploads `dist/` to the CDN |
+| `tools/third_party.py` | writes `THIRD-PARTY-NOTICES` (licenses of the libraries in the binary) |

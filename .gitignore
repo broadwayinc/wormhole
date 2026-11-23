@@ -24,3 +24,9 @@ states-backup-*/
 
 # Claude Code agent worktrees (nested checkouts, never commit)
 .claude/worktrees/
+
+# Release files made by tools/package.sh (uploaded by tools/upload.sh)
+/dist/
+
+# Server-specific notes (account, instance and network ids): never commit, never package
+/private/

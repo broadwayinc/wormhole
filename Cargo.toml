@@ -1,8 +1,9 @@
 [package]
 name = "wormhole"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 description = "Live one-way mirror of a folder from one Linux server to another"
+license = "Apache-2.0"
 publish = false
 
 [dependencies]
